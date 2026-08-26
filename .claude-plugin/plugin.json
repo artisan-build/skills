@@ -1,0 +1,23 @@
+{
+  "name": "artisan-build-skills",
+  "version": "0.1.0",
+  "description": "Artisan Build's agent skills for shipping and operating Laravel applications: Laravel Cloud cost attribution and more.",
+  "author": {
+    "name": "Artisan Build, Inc.",
+    "url": "https://artisan.build"
+  },
+  "homepage": "https://github.com/artisan-build/skills",
+  "repository": "https://github.com/artisan-build/skills",
+  "license": "MIT",
+  "keywords": [
+    "laravel",
+    "laravel-cloud",
+    "skills",
+    "operations",
+    "cost",
+    "finops"
+  ],
+  "skills": [
+    "./skills/operations/laravel-cloud-cost"
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "artisan-build",
+  "owner": {
+    "name": "Artisan Build, Inc.",
+    "url": "https://artisan.build"
+  },
+  "description": "Artisan Build's agent skills for shipping and operating Laravel applications, as an installable Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "artisan-build-skills",
+      "source": "./",
+      "description": "Agent skills for shipping and operating Laravel applications (Laravel Cloud cost attribution and more).",
+      "category": "operations",
+      "keywords": [
+        "laravel",
+        "laravel-cloud",
+        "operations",
+        "cost"
+      ]
+    }
+  ]
+}
