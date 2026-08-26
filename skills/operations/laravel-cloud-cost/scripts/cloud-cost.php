@@ -174,7 +174,7 @@ function dollars(?int $cents): string
 
 /**
  * Normalise a name for matching: lowercase, strip everything but letters and digits.
- * `phpscore.com` and `phpscore_com` and `PHPScore-COM` all collapse to `phpscorecom`.
+ * `acme-crm.com` and `acme_crm` and `ACME-CRM` all collapse to `acmecrm`.
  */
 function norm(string $s): string
 {
@@ -198,8 +198,8 @@ function strip_tld(string $s): string
  * Build the name index a resource is matched against.
  *
  * Laravel Cloud names an auto-provisioned resource after the application, sometimes
- * with the environment appended: `phpscore_com_production`, `ballast_production`,
- * `hone`. That convention is the only signal available, because the API exposes no
+ * with the environment appended: `acme_crm_production`, `widgets_production`,
+ * `beacon`. That convention is the only signal available, because the API exposes no
  * foreign key from a database, cache, bucket, or websocket cluster back to the
  * application that uses it. Everything this index produces is therefore `inferred`.
  *
@@ -251,8 +251,8 @@ function attribute(string $resourceName, array $index, array $overrides, array $
     $hit = $index[$n] ?? null;
 
     if ($hit === null) {
-        // Longest prefix wins: `phpscore_com_production` should match the
-        // `phpscore_com_production` key over the shorter `phpscore` one.
+        // Longest prefix wins: `acme_crm_production` should match the
+        // `acme_crm_production` key over the shorter `acmecrm` one.
         $best = null;
         foreach ($index as $key => $_) {
             if (str_starts_with($n, $key) && ($best === null || strlen($key) > strlen($best))) {

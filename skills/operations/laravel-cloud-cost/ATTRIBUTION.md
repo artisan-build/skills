@@ -26,13 +26,13 @@ Laravel Cloud names an auto-provisioned resource after the application, sometime
 environment appended. The report exploits that convention:
 
 1. **Normalise** both sides: lowercase, drop everything that is not a letter or a digit.
-   `phpscore.com`, `phpscore_com`, and `PHPScore-COM` all become `phpscorecom`.
+   `acme-crm.com`, `acme_crm`, and `ACME-CRM` all become `acmecrm`.
 2. **Build the index** from every application, using its slug and its name, each one both intact and
-   with a known TLD stripped (`ourcves.com` also indexes as `ourcves`), and each of those again with
-   every environment name and slug appended (`ballast` also indexes as `ballast_production`).
+   with a known TLD stripped (`tally.app` also indexes as `tally`), and each of those again with
+   every environment name and slug appended (`widgets` also indexes as `widgets_production`).
 3. **Match** a resource name against the index: exact key first, then the longest key the resource
-   name starts with, so `phpscore_com_production` prefers the `phpscore_com_production` key over the
-   shorter `phpscore` one.
+   name starts with, so `acme_crm_production` prefers the `acme_crm_production` key over the
+   shorter `acmecrm` one.
 4. Keys shorter than four characters are dropped, because they collide.
 5. A key matching **more than one** application is not a match. The resource is reported as
    unattributed and flagged as ambiguous, naming the candidates.
@@ -45,9 +45,9 @@ A `--map` file overrides the matcher and produces `override`:
 
 ```json
 {
-  "main": "hone",
-  "legacy_cache": "artisan-tv.com",
-  "shared_db": "clients.artisan.build"
+  "main": "beacon",
+  "legacy_cache": "oldsite.example",
+  "shared_db": "portal.example"
 }
 ```
 

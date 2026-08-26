@@ -85,7 +85,7 @@ When the user disputes an attribution, or the report flags one as ambiguous, fix
 a map file rather than by explaining the discrepancy each time:
 
 ```json
-{ "main": "hone", "legacy_cache": "artisan-tv.com" }
+{ "main": "beacon", "legacy_cache": "oldsite.example" }
 ```
 
 Keys are resource names as the report prints them; values are application names, slugs, or ids. Keep
