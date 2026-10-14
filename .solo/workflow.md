@@ -26,7 +26,7 @@ a change works is a live run against a real organization.
 - status: **inadequate** — do not gate merges on CI
 - minimum bar: CI must include (1) testing and (2) static analysis. This CI has neither.
 - workflows/jobs: `.github/workflows/validate.yml` — `scripts/validate-repo.sh` (structure, frontmatter
-  and plugin manifest invariants, `bash -n`, `php -l`, a regex secret scan) on PHP 8.2 and 8.3;
+  and plugin manifest invariants, `bash -n`, `php -l`, a regex secret scan) on PHP 8.5 only, which is the one runtime the fleet deploys;
   `.github/workflows/release.yml` — changesets.
 
 ## Dependency install (fresh worktree)
