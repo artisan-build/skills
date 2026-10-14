@@ -697,8 +697,11 @@ function render_text(array $doc): string
 
             if ($r['activity'] !== null) {
                 $a = $r['activity'];
-                $value = $a['value'] === null ? 'not measured' : rtrim(rtrim(number_format($a['value'], 2, '.', ''), '0'), '.') . ' ' . $a['unit'];
-                $o .= "      activity: {$a['state']} ({$value} over {$a['window']})\n";
+                $o .= $a['value'] === null
+                    ? "      activity: {$a['state']} (not measured)\n"
+                    : '      activity: ' . $a['state'] . ' ('
+                        . rtrim(rtrim(number_format($a['value'], 2, '.', ''), '0'), '.')
+                        . " {$a['unit']} over {$a['window']})\n";
                 if ($a['note'] !== null) {
                     $o .= '                ' . wrap($a['note']) . "\n";
                 }
@@ -830,7 +833,10 @@ try {
     $buckets = $cli->list(['bucket:list'], ['id', 'name', 'type', 'status', 'visibility', 'createdAt']);
     $wsClusters = $cli->list(['websocket-cluster:list'], ['id', 'name', 'type', 'status', 'createdAt']);
 
-    $planned += count($clusters) + count($caches) + count($wsClusters);
+    // One websocket-application:list per cluster regardless; the metrics calls
+    // only happen when metrics were asked for.
+    $planned += count($wsClusters)
+        + ($opts['metrics'] ? count($clusters) + count($caches) : 0);
 
     // The reference sets. One environment can hold one schema, one cache, and one
     // websocket application, so these are keyed by the resource id.
