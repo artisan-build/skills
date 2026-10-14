@@ -14,6 +14,13 @@ than quietly absorbed. And a set of **findings** names the things that usually t
 a serverless database billed a flat amount every month, a cache costing ten times the application it
 serves, a websocket cluster left up after the feature came out, a resource nobody can put a name to.
 
+A second script answers the question the breakdown cannot: **is anything actually using this?** The
+bill gives no application id for a database or a cache, so the breakdown matches them by name, and a
+name is weak evidence for ownership and no evidence at all for use. The orphan probe goes and reads
+the real link, one environment at a time, and classifies every database, cache, bucket, and
+websocket cluster by what points at it rather than by what it is called. It takes one API call per
+environment, so it is minutes rather than seconds, and it tells you the call count before it starts.
+
 The arithmetic is done by a script, not by the model. Two runs over the same period produce the same
 numbers, which is the one thing a cost report has to do. What the model brings is the part a script
 cannot: deciding which findings matter to you, and going and reading the code to work out *why* a
@@ -26,12 +33,16 @@ database never sleeps.
 | The Laravel Cloud invoice arrived and you want it explained | The same period, broken down per application, reconciled against the invoice total |
 | The bill jumped and nobody knows why | Four periods of history, and a finding for any resource whose cost is flat, duplicated, or unattributable |
 | You want to know what one client's app actually costs | That application's compute plus every resource attributed to it, with each line's confidence shown |
-| A project was cancelled and you want to be sure it stopped billing | The unattributed section, which is where a deleted project's leftovers show up |
+| A project was cancelled and you want to be sure it stopped billing | The unattributed section, and then the probe, which says whether anything still points at what it left behind |
 | You are deciding whether an app can move to a smaller tier | Per-environment CPU hours, which separate an app that ran all period from one that woke up occasionally |
+| Somebody asks whether a database is safe to delete | A verdict with the evidence: which environments reference it, whether it has done any work in thirty days, and what it costs per period |
+| You moved an app from MySQL to Postgres and want to know if the old cluster is still billing | The old cluster listed as a probable orphan, because no environment references any schema in it |
+| The report's per-app totals are being shown to a client | A `--map` file that pins the resources whose ownership the probe proved, so the next run is evidence rather than naming |
 
 Do not reach for it to *change* anything. It reads. When a finding points at a resource that should
 be resized or removed, that is a decision for you, and the change itself belongs in the Laravel Cloud
-dashboard or in a deployment skill.
+dashboard or in a deployment skill. In particular, a probable orphan is not a deletion order: see
+the question below about what the probe cannot see.
 
 ## Common questions
 
@@ -66,9 +77,55 @@ a connection pool that never closes. The finding tells you which database to loo
 for; confirming it means reading the app or the dashboard's database metrics.
 
 **Can it look at metrics or logs?**
-Not for cost. The CLI exposes environment logs, which can help identify what is touching an expensive
-resource, but no API links a log line to a dollar. Database connection counts and memory use live in
-the dashboard only.
+Metrics, yes, within limits. The CLI reports thirty days of compute-hours, average CPU, and stored
+bytes per database cluster, and bandwidth per cache, and the probe uses compute-hours to tell a
+cluster that is working from one that is merely switched on. Several of the other fields are not
+usable: writes come back as zero for every cluster, and cache hit, miss, and throughput totals come
+back empty. Connection counts and query volume are still dashboard-only. Logs are readable through
+the CLI and can show what is touching an expensive resource, but no API links a log line to a dollar.
+
+**How does it decide something is an orphan?**
+By what references it, not by its name. Every environment in the organization is asked for the
+database schema, cache, and websocket application it is attached to, and anything no environment
+names is a candidate. A database cluster counts as a candidate only when **none** of the schemas
+inside it is referenced, so a cluster with one dead schema and three live ones is not flagged. It
+then separates the candidates that have done measurable work in the last thirty days from the ones
+that have not, because those mean different things.
+
+**So can I delete whatever it calls a probable orphan?**
+No, and this is the one place to be careful. The probe sees Laravel Cloud. It cannot see a local
+script, a data pipeline, an export job, or a laptop that still holds a connection, and it cannot
+follow an environment that was wired up by hand: an environment that sets its own `DB_HOST` talks to
+whatever that says, which is why the probe separately flags resources that look attached but have
+been overridden, and resources that look abandoned but are visibly doing work. Treat the output as a
+shortlist of things to ask about, not as a list of things to remove.
+
+**Can I add up the candidates to get what I would save?**
+Add them up from the probe's own figures, and check two lines first. Laravel Cloud sometimes lists one
+database cluster **twice**, under two different names with the same underlying id; the probe treats
+that as the one resource it is, judges it once and bills it once, and points the duplicate entry at
+the entry holding the money. And it reconciles its own arithmetic against the resource total the cost
+report published, so if the two ever disagree in the direction that would inflate a saving, it says so
+instead of printing the total. The saving is also an upper bound for a different reason: a resource
+nothing in Cloud references may still be reachable by hand-wired configuration.
+
+**Why can't it tell me about buckets?**
+Because no field in the CLI connects a bucket to an environment, in either direction. Databases,
+caches, and websocket clusters can be proven; buckets are reported as unproven, with the name as the
+only hint. Saying "no evidence exists" is the honest answer, and an invented one would be the
+dangerous kind of wrong here.
+
+**How slow is the probe, and will it get rate limited?**
+One call per environment plus one per database cluster and cache: about fifty calls for a
+twenty-environment organization, a few minutes end to end. It prints the number before it spends it.
+It deliberately makes those calls one at a time, because concurrent calls do get throttled, and it
+waits and retries when the API says to rather than dropping a result.
+
+**Does it read my environment variables?**
+It reads their **names**, and only the names that indicate hand-wired database, cache, bucket, or
+broadcasting configuration, because the presence of those names is what tells it an attachment has
+been overridden. It asks the CLI for the key field alone, so no value is ever fetched, and it never
+requests a connection string or passes the CLI's flag for revealing masked values.
 
 **How current are the figures?**
 Typically thirty to sixty minutes behind. The report prints the snapshot time and quotes it alongside
@@ -84,3 +141,23 @@ the total, so nobody reads it as live.
 - Anything it could not attribute is listed on its own rather than folded into an application's
   total, and you recognise at least one of them as something you had forgotten about.
 - Running it twice over the same period gives you identical numbers.
+
+The orphan probe has its own signs that it did its job.
+
+- It prints the number of API calls it is about to make, then makes roughly that many, and reports
+  how many were throttled — ideally none.
+- Every database, cache, bucket, and websocket cluster in the organization appears with a verdict,
+  and the verdict count matches the number of distinct resources it found. Where Laravel Cloud listed
+  one resource twice, the report says so and counts it once.
+- The reconcile line shows the cost carrying a verdict as no larger than the resource total on the
+  bill. Larger would mean something was counted twice, and it would be reported as an error rather
+  than printed as a total.
+- Resources you know are in production come back `in-use`, naming the environments you expect, even
+  when their names look nothing like the application.
+- Each candidate carries what it costs per period, so the shortlist is ordered by what fixing it is
+  worth rather than by name.
+- Where it disagrees with the cost report about who owns a resource, it says so and hands you a map
+  file; pasting that into `--map` and running the cost report again moves the money and shrinks the
+  unattributed total.
+- Nothing in the output contains a password, a connection string, or an environment variable's
+  value — only variable names.
