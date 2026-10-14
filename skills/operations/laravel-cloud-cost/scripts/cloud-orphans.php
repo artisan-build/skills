@@ -658,9 +658,15 @@ function render_text(array $doc): string
     $o .= "INVENTORY\n";
     $o .= "  {$i['applications']} applications, {$i['environments']} environments\n";
     $o .= "  {$i['databaseClusters']} database clusters holding {$i['databaseSchemas']} schemas, "
-        . "{$i['caches']} caches, {$i['buckets']} buckets, {$i['websocketClusters']} websocket clusters\n\n";
+        . "{$i['caches']} caches, {$i['buckets']} buckets, {$i['websocketClusters']} websocket clusters\n";
+    if ($i['duplicateIdGroups'] > 0) {
+        $o .= "  {$i['listedEntries']} listed entries, {$i['distinctResources']} distinct resources: "
+            . "{$i['duplicateIdGroups']} resource(s) are listed twice under different names.\n"
+            . "  Each is judged and billed once; the second entry points at the first.\n";
+    }
+    $o .= "\n";
 
-    $o .= "VERDICTS\n";
+    $o .= "VERDICTS  (one per distinct resource)\n";
     foreach ($doc['verdictCounts'] as $v => $n) {
         $o .= sprintf("  %-26s %d\n", $v, $n);
     }
@@ -682,7 +688,11 @@ function render_text(array $doc): string
         $o .= "  Cloud can still hold a connection.\n\n";
 
         foreach ($candidates as $r) {
-            $money = $r['cost'] === null ? 'cost unknown' : dollars($r['cost']['totalCents']) . ' per period';
+            $money = match (true) {
+                $r['cost'] !== null => dollars($r['cost']['totalCents']) . ' per period',
+                $r['sameIdAs'] !== null => "billed under '{$r['sameIdAs']}'",
+                default => 'cost unknown',
+            };
             $o .= '  [' . strtoupper($r['verdict']) . "] {$r['kind']} '{$r['name']}'  ({$money})\n";
             $o .= '      type:     ' . ($r['type'] ?? 'unknown') . "\n";
 
@@ -771,10 +781,20 @@ function render_text(array $doc): string
     $o .= "  {$c['made']} made, {$c['planned']} planned, {$c['rateLimited']} rate limited, {$c['retried']} retried";
     $o .= $c['costReportCalls'] > 0 ? ", plus {$c['costReportCalls']} by the cost report\n" : "\n";
 
-    if ($doc['costCoverage'] !== null && $doc['costCoverage']['usageRowsWithoutListedResource'] > 0) {
-        $o .= "\n  ! {$doc['costCoverage']['usageRowsWithoutListedResource']} billed resource(s) in the cost report are not in any\n";
-        $o .= "    resource list, so this probe has no verdict for them. Usually something\n";
-        $o .= "    deleted partway through the period, billed for the part it ran.\n";
+    if ($doc['costCoverage'] !== null) {
+        $cc = $doc['costCoverage'];
+        if ($cc['usageRowsWithoutListedResource'] > 0) {
+            $o .= "\n  ! {$cc['usageRowsWithoutListedResource']} billed resource(s) in the cost report are not in any\n";
+            $o .= "    resource list, so this probe has no verdict for them. Usually something\n";
+            $o .= "    deleted partway through the period, billed for the part it ran.\n";
+        }
+
+        $o .= "\nRECONCILE\n";
+        $o .= '  ' . dollars($cc['attachedCents']) . ' of resource cost carries a verdict, against '
+            . dollars($cc['costReportResourcesCents']) . " the cost report\n  published for resources. ";
+        $o .= $cc['withinTotal']
+            ? "The parts do not exceed the total, so nothing is\n  counted twice.\n"
+            : "! The parts EXCEED the total: a billed line is counted more\n  than once. Do not sum these figures.\n";
     }
 
     if ($doc['errors'] !== []) {
@@ -997,6 +1017,70 @@ try {
         ];
     }
 
+    // One resource, listed twice.
+    //
+    // `database-cluster:list` can return two entries carrying the SAME id under
+    // different names. It is one cluster, and treating the entries as two
+    // resources breaks three things at once: the cost join keys on the id, so both
+    // entries claim the same billed line and any sum over them invents money that
+    // is not on the invoice; the entries can carry different schema subsets, so one
+    // reads as referenced and the other as an orphan; and the verdict ends up
+    // contradicting itself about a single cluster.
+    //
+    // So references, schemas, and the verdict are decided once per id, and the
+    // cost is billed to one entry while the rest point at it. No split is invented:
+    // there is one line on the invoice and it stays whole.
+    $groups = [];
+    foreach ($resources as $i => $r) {
+        $groups[$r['kind'] . '|' . $r['id']][] = $i;
+    }
+
+    $duplicateGroups = 0;
+    foreach ($groups as $members) {
+        if (count($members) < 2) {
+            continue;
+        }
+        $duplicateGroups++;
+
+        $refs = [];
+        $schemas = [];
+        foreach ($members as $i) {
+            foreach ($resources[$i]['referencedBy'] as $ref) {
+                $refs[$ref['environmentId']] = $ref;
+            }
+            foreach ($resources[$i]['schemas'] ?? [] as $s) {
+                $schemas[$s['id']] = $s;
+            }
+        }
+        $refs = array_values($refs);
+        $schemas = array_values($schemas);
+
+        // The entry that carries the references is the one a reader recognises, so
+        // it takes the money. Name order breaks a tie, to keep two runs identical.
+        usort($members, static function ($a, $b) use ($resources) {
+            return [-count($resources[$a]['referencedBy']), $resources[$a]['name']]
+                <=> [-count($resources[$b]['referencedBy']), $resources[$b]['name']];
+        });
+        $primary = $members[0];
+
+        $names = [];
+        foreach ($members as $i) {
+            $names[] = $resources[$i]['name'];
+        }
+
+        foreach ($members as $i) {
+            $resources[$i]['referencedBy'] = $refs;
+            if ($resources[$i]['schemas'] !== null) {
+                $resources[$i]['schemas'] = $schemas;
+            }
+            $resources[$i]['duplicate'] = [
+                'isPrimary' => $i === $primary,
+                'primaryName' => $resources[$primary]['name'],
+                'listedAs' => $names,
+            ];
+        }
+    }
+
     $calibration = calibrate($resources);
 
     // Metrics that match another resource's exactly are usually one resource
@@ -1009,7 +1093,7 @@ try {
             continue;
         }
         $fp = $r['kind'] . '|' . json_encode($r['metrics']);
-        $byMetricFingerprint[$fp][] = $r['name'];
+        $byMetricFingerprint[$fp][] = ['id' => $r['id'], 'name' => $r['name']];
     }
 
     $out = [];
@@ -1061,14 +1145,34 @@ try {
                 . 'listed as setting wiring keys by hand.';
         }
 
+        // Identical metrics under a DIFFERENT id are a guess about what is going on.
+        // Identical metrics under the SAME id are not a guess, and that case is
+        // stated as the fact it is, below.
         if ($r['metrics'] !== null && ($r['activityValue'] ?? 0) > 0) {
             $fp = $r['kind'] . '|' . json_encode($r['metrics']);
-            $twins = array_values(array_diff($byMetricFingerprint[$fp] ?? [], [$r['name']]));
-            if ($twins !== []) {
-                $notes[] = 'its metrics are identical to ' . implode(', ', array_map(static fn ($n) => "'" . $n . "'", $twins))
-                    . ', which usually means one underlying resource reported twice rather than two '
-                    . 'resources doing the same work. Treat the activity figure as the other one\'s.';
+            $twins = [];
+            foreach ($byMetricFingerprint[$fp] ?? [] as $other) {
+                if ($other['id'] !== $r['id']) {
+                    $twins[] = "'" . $other['name'] . "'";
+                }
             }
+            if ($twins !== []) {
+                $notes[] = 'its metrics are identical to ' . implode(', ', array_unique($twins))
+                    . ', which is a different resource reporting the same figures. That usually '
+                    . 'means one underlying resource behind two records rather than two resources '
+                    . 'doing the same work, but the ids differ, so this is an observation and not '
+                    . 'a proven identity.';
+            }
+        }
+
+        if (isset($r['duplicate'])) {
+            $notes[] = 'the CLI lists this resource twice: ' . implode(' and ', array_map(
+                static fn ($n) => "'" . $n . "'",
+                $r['duplicate']['listedAs'],
+            )) . ' share the id ' . $r['id'] . ', so they are one resource under two names, not two '
+                . 'resources. Its references, schemas and verdict are decided across both entries, '
+                . 'and the cost is billed once, against '
+                . ($r['duplicate']['isPrimary'] ? 'this entry' : "'" . $r['duplicate']['primaryName'] . "'") . '.';
         }
 
         // Schemas belonging to more than one application: a shared cluster. One
@@ -1082,7 +1186,15 @@ try {
                 . ' all reference it, so its cost cannot be assigned to one application.';
         }
 
+        // One id, one billed line. A second entry sharing the id points at the one
+        // carrying the money rather than repeating it, so a sum over these rows is
+        // the invoice and not a multiple of it.
+        $sameIdAs = null;
         $costRow = $cost['byId'][$r['id']] ?? null;
+        if (isset($r['duplicate']) && ! $r['duplicate']['isPrimary']) {
+            $costRow = null;
+            $sameIdAs = $r['duplicate']['primaryName'];
+        }
 
         // The cost report had only the name. Where a reference proves a different
         // owner, that is money on the wrong application: not an orphan, but wrong.
@@ -1111,7 +1223,10 @@ try {
             }
         }
 
-        $verdictCounts[$v]++;
+        // Count a resource once, however many times the CLI listed it.
+        if (! isset($r['duplicate']) || $r['duplicate']['isPrimary']) {
+            $verdictCounts[$v]++;
+        }
 
         $row = [
             'kind' => $r['kind'],
@@ -1131,6 +1246,7 @@ try {
             'activity' => $act,
             'metrics' => $r['metrics'],
             'cost' => $costRow,
+            'sameIdAs' => $sameIdAs,
             'nameOwner' => name_owner($r['name'], $apps),
             'misattributed' => $mis,
             'notes' => $notes,
@@ -1181,10 +1297,32 @@ try {
         foreach ($cost['byId'] as $id => $_) {
             isset($ids[$id]) ? $joined++ : $missing++;
         }
+        // Add the money this probe attached to its verdicts and compare it to the
+        // resource total the cost report published. The parts can be smaller than
+        // the total, because a billed resource that no list reports gets no verdict.
+        // They must never be larger: that would mean a billed line counted twice,
+        // which is exactly what a duplicate id used to do.
+        $attached = 0;
+        foreach ($out as $r) {
+            $attached += (int) ($r['cost']['totalCents'] ?? 0);
+        }
+        $resourcesTotal = (int) ($cost['doc']['breakdown']['resourcesCents'] ?? 0);
+        $withinTotal = $attached <= $resourcesTotal;
+
         $costCoverage = [
             'usageRowsJoined' => $joined,
             'usageRowsWithoutListedResource' => $missing,
+            'attachedCents' => $attached,
+            'costReportResourcesCents' => $resourcesTotal,
+            'withinTotal' => $withinTotal,
         ];
+
+        if (! $withinTotal) {
+            $errors[] = 'the cost attached to these verdicts (' . dollars($attached) . ') exceeds the '
+                . 'resource total the cost report published (' . dollars($resourcesTotal) . ') by '
+                . dollars($attached - $resourcesTotal) . '. A billed line has been counted more than '
+                . 'once, so do not sum these figures until it is explained.';
+        }
     }
 
     $order = [V_ORPHAN => 0, V_SUPERSEDED => 1, V_ACTIVE => 2, V_UNPROVEN => 3, V_IN_USE => 4];
@@ -1222,6 +1360,11 @@ try {
             'caches' => count($caches),
             'buckets' => count($buckets),
             'websocketClusters' => count($wsClusters),
+            // Entries the CLI listed, against resources that actually exist. These
+            // differ when one resource is listed twice under two names.
+            'listedEntries' => count($out),
+            'distinctResources' => count($groups),
+            'duplicateIdGroups' => $duplicateGroups,
         ],
         'verdictCounts' => $verdictCounts,
         'resources' => $out,

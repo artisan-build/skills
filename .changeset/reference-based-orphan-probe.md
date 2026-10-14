@@ -29,3 +29,10 @@ Also corrected two things the skill claimed that are not true of CLI v0.6.3: dat
 metrics do exist (`database-cluster:metrics`, `cache:metrics`, windows `6h` to `30d`), and
 `environment:get` does return the three attachment ids rather than null. The docs now name which
 metric fields are usable and which come back empty.
+
+The resource lists can return two entries carrying the same id under different names. That is one
+resource with two records, so the probe decides references, schemas and the verdict once per id and
+bills the cost once, pointing the duplicate entry at the one holding the money with `sameIdAs`. It
+also reconciles the cost it attaches to verdicts against the resource total the cost report
+published, and reports a sum that exceeds it as an error rather than printing a total that is too
+high.

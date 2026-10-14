@@ -134,12 +134,15 @@ its verdict. The call budget is printed to **stderr** in `--json` mode, so stdou
   },
 
   "inventory": {
-    "applications": 4, "environments": 6, "databaseClusters": 3,
-    "databaseSchemas": 4, "caches": 2, "buckets": 2, "websocketClusters": 0
+    "applications": 4, "environments": 6, "databaseClusters": 4,
+    "databaseSchemas": 5, "caches": 2, "buckets": 2, "websocketClusters": 0,
+    "listedEntries": 8,        // rows the CLI returned
+    "distinctResources": 7,    // resources that actually exist
+    "duplicateIdGroups": 1     // resources listed more than once; see below
   },
 
-  "verdictCounts": {
-    "in-use": 5, "possibly-superseded": 1, "unreferenced-but-active": 1,
+  "verdictCounts": {           // one per DISTINCT resource, so these sum to 7
+    "in-use": 3, "possibly-superseded": 1, "unreferenced-but-active": 0,
     "probable-orphan": 1, "unproven": 2
   },
 
@@ -176,15 +179,16 @@ its verdict. The call budget is printed to **stderr** in `--json` mode, so stdou
       },
       "metrics": {                 // null with --no-metrics or when the call failed
         "computeHoursTotal": 0,
-        "cpuUsageAverage": 0.007,
-        "storageUsageCurrentBytes": 1189213840
+        "cpuUsageAverage": 0.004,
+        "storageUsageCurrentBytes": 2147483648
       },
 
-      "cost": {                    // null when the cost report found no billed line for it
-        "totalCents": 4538,
+      "cost": {                    // null when the cost report found no billed line for it,
+        "totalCents": 1250,        // and null on the second entry of a duplicated id
         "attributedTo": "widgets.example",   // what the COST REPORT decided, by name
         "confidence": "inferred"             // inferred | override | unattributed
       },
+      "sameIdAs": null,            // the entry carrying the cost, when this one shares its id
       "nameOwner": "widgets.example",        // the application its NAME looks like: a hint
       "misattributed": null,                 // {costReportSays, referenceProves} when they disagree
       "notes": []                            // caveats in plain words; see below
@@ -194,15 +198,15 @@ its verdict. The call budget is printed to **stderr** in `--json` mode, so stdou
   "misattributions": [             // in use, but the cost report put the money elsewhere
     {
       "kind": "cache",
-      "name": "main",
+      "name": "shared_cache",
       "identifier": "cache-...",
-      "totalCents": 2000,
+      "totalCents": 900,
       "costReportSays": null,            // null = the cost report could not attribute it at all
       "referenceProves": ["widgets.example"],
       "mappable": true                   // false when several applications share it
     }
   ],
-  "mapSuggestion": { "main": "widgets.example" },   // ready for cloud-cost.php --map
+  "mapSuggestion": { "shared_cache": "widgets.example" },  // ready for cloud-cost.php --map
 
   "danglingReferences": [          // an environment points at something no list reports
     { "environment": "widgets.example / staging", "kind": "cache", "id": "cache-..." }
@@ -210,7 +214,10 @@ its verdict. The call budget is printed to **stderr** in `--json` mode, so stdou
 
   "costCoverage": {                // null with --no-cost
     "usageRowsJoined": 7,
-    "usageRowsWithoutListedResource": 3   // billed, but in no resource list: no verdict available
+    "usageRowsWithoutListedResource": 1,  // billed, but in no resource list: no verdict available
+    "attachedCents": 12400,               // resource cost that carries a verdict
+    "costReportResourcesCents": 12750,    // what the cost report published for resources
+    "withinTotal": true                   // false means a billed line is counted twice: see errors[]
   },
 
   "errors": []                     // per-resource failures that did not stop the run
@@ -231,9 +238,46 @@ its verdict. The call budget is printed to **stderr** in `--json` mode, so stdou
 resource type, which the probe works out from the resources of that type that *are* referenced. A
 `probable-orphan` with `activity.state: "unknown"` rests on the references alone.
 
-`notes[]` carries the caveats that change what a verdict means: a shared cluster, metrics identical
-to another resource's (usually one resource reported twice), the manual-wiring explanation behind
-the two middle verdicts, and the reason a bucket cannot be judged.
+`notes[]` carries the caveats that change what a verdict means: a shared cluster, a resource listed
+twice, metrics identical to a different resource's, the manual-wiring explanation behind the two
+middle verdicts, and the reason a bucket cannot be judged.
+
+### One resource, listed twice
+
+`database-cluster:list` can return two entries that carry **the same id** under different names:
+
+```jsonc
+[
+  { "id": "plain-field-12345678", "name": "widgets",         "schemas": [{ "id": "1001", "name": "main" }] },
+  { "id": "plain-field-12345678", "name": "widgets_staging", "schemas": [{ "id": "1002", "name": "main" }] }
+]
+```
+
+That is one cluster under two names, not two clusters, and taking the entries at face value breaks
+three things at once:
+
+- **The money.** The cost join keys on the id, so both entries claim the same billed line. Any sum
+  over them invents cost that is not on the invoice.
+- **The verdict.** The entries can carry different schema subsets, so one reads `in-use` and the
+  other `probable-orphan` — two contradictory answers about a single cluster.
+- **The counts.** Verdicts would add up to more resources than exist.
+
+So references, schemas, and the verdict are decided **once per id**, across every entry sharing it.
+Both entries report the same verdict and the same `referencedBy`. The cost is billed to one of them,
+the one carrying the references (name order breaks a tie, so two runs agree), and the other gets
+`cost: null` and `sameIdAs` naming the entry that holds it. No split is invented: there is one line on
+the invoice and it stays whole.
+
+`inventory.duplicateIdGroups` says how many resources this applied to, and `verdictCounts` counts
+distinct resources rather than listed entries.
+
+### Reconcile
+
+`costCoverage` adds up the resource cost that carries a verdict and compares it to the resource total
+the cost report published. The parts can be **smaller** than the total, because a billed resource that
+no list reports gets no verdict. They must never be **larger**: that means a billed line has been
+counted more than once. When that happens `withinTotal` is `false` and `errors[]` says so by how much,
+rather than the output quietly presenting a total that is too high.
 
 ## Errors
 

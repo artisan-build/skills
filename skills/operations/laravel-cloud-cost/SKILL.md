@@ -205,6 +205,18 @@ php scripts/cloud-cost.php --period=previous --map=map.json --dir=<path>
 A cluster whose schemas are referenced by **two** applications is shared, and no map entry can split
 it. The probe says so and emits no suggestion for it.
 
+### Two things that make a sum wrong
+
+The resource lists can return **two entries carrying the same id** under different names. That is one
+resource with two records, not two resources. The probe decides the verdict once per id and bills the
+cost once, pointing the second entry at the first with `sameIdAs`, so never sum a column of these
+rows without checking `inventory.duplicateIdGroups` first.
+
+It also reconciles: the resource cost carrying a verdict is compared against the resource total the
+cost report published. Smaller is normal, because a billed resource that no list reports gets no
+verdict. Larger means a line is counted twice, and it lands in `errors[]` with `withinTotal: false`.
+If you see that, report the discrepancy rather than the total.
+
 ### What a verdict still does not know
 
 This probe sees Laravel Cloud and nothing else. A `probable-orphan` can still have a live consumer:

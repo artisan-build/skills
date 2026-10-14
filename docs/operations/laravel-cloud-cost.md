@@ -100,6 +100,15 @@ whatever that says, which is why the probe separately flags resources that look 
 been overridden, and resources that look abandoned but are visibly doing work. Treat the output as a
 shortlist of things to ask about, not as a list of things to remove.
 
+**Can I add up the candidates to get what I would save?**
+Add them up from the probe's own figures, and check two lines first. Laravel Cloud sometimes lists one
+database cluster **twice**, under two different names with the same underlying id; the probe treats
+that as the one resource it is, judges it once and bills it once, and points the duplicate entry at
+the entry holding the money. And it reconciles its own arithmetic against the resource total the cost
+report published, so if the two ever disagree in the direction that would inflate a saving, it says so
+instead of printing the total. The saving is also an upper bound for a different reason: a resource
+nothing in Cloud references may still be reachable by hand-wired configuration.
+
 **Why can't it tell me about buckets?**
 Because no field in the CLI connects a bucket to an environment, in either direction. Databases,
 caches, and websocket clusters can be proven; buckets are reported as unproven, with the name as the
@@ -137,8 +146,12 @@ The orphan probe has its own signs that it did its job.
 
 - It prints the number of API calls it is about to make, then makes roughly that many, and reports
   how many were throttled — ideally none.
-- Every database, cache, bucket, and websocket cluster in the organization appears exactly once,
-  with a verdict, and the verdicts add up to the inventory it printed.
+- Every database, cache, bucket, and websocket cluster in the organization appears with a verdict,
+  and the verdict count matches the number of distinct resources it found. Where Laravel Cloud listed
+  one resource twice, the report says so and counts it once.
+- The reconcile line shows the cost carrying a verdict as no larger than the resource total on the
+  bill. Larger would mean something was counted twice, and it would be reported as an error rather
+  than printed as a total.
 - Resources you know are in production come back `in-use`, naming the environments you expect, even
   when their names look nothing like the application.
 - Each candidate carries what it costs per period, so the shortlist is ordered by what fixing it is

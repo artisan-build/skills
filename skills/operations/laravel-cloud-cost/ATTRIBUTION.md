@@ -100,6 +100,27 @@ next to it. The vocabulary is deliberately not "orphan" and "not orphan":
 A cluster is only a candidate when **no schema in it** is referenced. Clusters hold several schemas,
 and a cluster with one dead schema and three live ones is a live cluster.
 
+## The resource lists can report one resource twice
+
+`database-cluster:list` can return two entries carrying **the same id** under different names, for
+example `widgets` and `widgets_staging` both at `plain-field-12345678`. It is one cluster with two
+records, and it is a trap in three directions at once:
+
+- The billed line is keyed by id, so believing both entries counts the same money twice.
+- The entries can list different schemas, so one entry looks referenced and the other looks
+  abandoned, and a probe reporting per entry contradicts itself about a single cluster.
+- The organization looks like it holds more resources than it does.
+
+The identity that matters is the **id**, never the name. So the probe decides references, schemas and
+the verdict once per id across every entry that shares it, bills the cost to one entry, and points
+the others at it with `sameIdAs`. It does not split the cost between them: the invoice has one line,
+and a division invented here would be a second guess stacked on the first.
+
+This is also why the probe reconciles. The resource cost it attaches to verdicts is compared to the
+resource total the cost report published, and a sum that comes out **larger** than the published
+total is reported as an error rather than printed as a total. A duplicate id was how that could
+happen, and a reconciliation is how it stops being silent.
+
 ## Manual wiring beats both
 
 An environment that sets `DB_HOST`, `DB_CONNECTION`, `REDIS_HOST` or `DATABASE_URL` itself talks to
