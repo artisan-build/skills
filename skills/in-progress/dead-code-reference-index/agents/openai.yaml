@@ -1,0 +1,3 @@
+interface:
+  display_name: "Dead Code Reference Index"
+  short_description: "Find references to dead-code candidates outside the app they live in"
