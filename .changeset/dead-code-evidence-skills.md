@@ -39,4 +39,17 @@ question, answer, who answered, the date and the evidence it rested on, correcti
 rather than by editing a row. No category's answer vocabulary contains a value meaning `dead`, and an
 answer outside its vocabulary exits 2 without writing.
 
+Both were shaped against a live read-only run over 149 local checkouts, an ops-knowledge tree, one
+application's CI and `.cloud` config, and an organization's GitHub code search. Five things that run
+found and the scripts now handle: the prefilter picks ripgrep or ugrep over grep when either is
+installed, because BSD grep took a minute and a half over the same tree that ripgrep answered in
+seven seconds; route names, command signatures and tool names only match on name boundaries, after
+`github.callback` returned 43 `linked` hits that were all another application's
+`auth.github.callback`; a search root holding the run's own earlier output needs `excludePaths`, or
+the report is read back as evidence; the `github` source needs `excludeRepos` naming the repository
+under test, because code search has no `selfRoots` and returned 39 of the application's own call
+sites; and a hit from a directory that looks like another checkout of the application is flagged in
+`notes`, after a worktree under a hidden `.worktrees` directory supplied 21 `linked` hits for one
+route.
+
 Both are in `skills/in-progress/`, so neither ships in the plugin yet.

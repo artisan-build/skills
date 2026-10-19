@@ -38,7 +38,7 @@ hit, with a row carrying empty hit columns for a candidate that had none.
       "reason": "no dispatch found",
       "extra": { "owner": "platform" },
       "indexVerdict": "alive-elsewhere",
-      "hitCounts": { "linked": 2, "inferred": 3, "noContextSuppressed": 11 },
+      "hitCounts": { "linked": 2, "inferred": 3, "noContextSuppressed": 11, "droppedOverMaxHits": 0 },
       "needles": [{ "text": "App\\Jobs\\SyncOrders", "matchKind": "fqcn", "confidence": "linked" }],
       "hits": [
         {
@@ -77,6 +77,10 @@ a shortlisted file is inside a `selfRoots` path.
 
 `hitCounts.noContextSuppressed` counts matches thrown away for failing their context requirement. A
 candidate with zero linked hits and a large suppressed count is the shape that needs a human to look.
+
+`hitCounts.droppedOverMaxHits` counts hits that were found and not kept, because the candidate went
+over `--max-hits`. The counts above it are taken before the cap, so they stay true. Linked hits sort
+first, so a truncated list keeps the evidence worth reading.
 
 `needles` is every needle built for that candidate, which is how you check that a candidate's kind
 was inferred the way you expected.

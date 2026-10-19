@@ -97,6 +97,17 @@ hits are counted in `hitCounts.noContextSuppressed` and left out of the report.
 to `inferred`, so they cannot be mistaken for the fenced ones. Turn it on when a candidate's only
 evidence is suppressed and you want to see what was thrown away.
 
+## Needles too short to fence
+
+A needle with no context requirement and fewer than eight characters is reported in `notes` before
+the run spends time on it. A one-word MCP tool name is the usual cause: `catalog` appears in most
+repositories that have anything to do with a product, and every one of those is a `linked` hit by the
+rule above because a tool name genuinely is a bare string in a manifest.
+
+There is no good fix inside the matcher, so the script says so instead. Read such a candidate's hits
+by hand, give the source config narrower roots, or confirm the tool name against its manifest and
+take the candidate off the list.
+
 ## Known false-positive shapes
 
 A short class name that is a common English word matches prose. `Status`, `Token`, `Report` and

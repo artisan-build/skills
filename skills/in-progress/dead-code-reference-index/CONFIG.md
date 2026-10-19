@@ -12,7 +12,10 @@ database. `--print-config` writes a starter.
       "exclude": ["vendor", "node_modules", ".git"],
       "extensions": ["php", "json", "yml", "yaml", "sh"]
     },
-    "ops": { "roots": ["/notes/runbooks", "/notes/playbooks"] },
+    "ops": {
+      "roots": ["/notes/runbooks", "/notes/playbooks"],
+      "excludePaths": ["/notes/runbooks/dead-code-reports"]
+    },
     "deploy": {
       "roots": ["/checkouts/widget-shop"],
       "paths": [".github/workflows", ".cloud/config.json", "Procfile", "crontab"]
@@ -48,6 +51,7 @@ These four fields are shared by `repos`, `ops`, `deploy` and `contracts`.
 | --- | --- |
 | `roots` | absolute paths to search. A root may be a single file. A missing root is reported in `notes` and skipped |
 | `exclude` | directory names never walked. Defaults to the usual build and dependency directories |
+| `excludePaths` | absolute paths skipped entirely, as opposed to directory names skipped anywhere |
 | `extensions` | file extensions read, without the dot. Defaults differ per source |
 
 `deploy` also takes `paths`, which are relative paths inside each root. Only those are read, so the
@@ -64,12 +68,25 @@ Default extensions: `repos` reads code and config (`php`, `json`, `yml`, `yaml`,
 A file larger than `--max-file-kb` (512 KB by default) is skipped. Minified assets and committed
 fixtures are the usual reason to leave that low.
 
+Put this run's own output directory in `excludePaths` if it sits anywhere under a search root. A
+report written under an ops-knowledge root is read back on the next run as evidence, and a candidate
+then reads as alive because the previous run said it might be. On a live run that mistake turned
+four `no-external-evidence` candidates into `alive-elsewhere` and the only clue was a hit count that
+had gone up by seven across the board.
+
+Name every checkout of the application in `selfRoots`, including worktrees and hidden ones. When a
+shortlisted file sits inside a directory that holds a `composer.json`, an `artisan` or a `.git` and
+is named like a `selfRoots` entry, the run says so in `notes`: on the same live run, a worktree under
+a hidden `.worktrees` directory supplied 21 `linked` hits for one route name, all of them the
+application quoting its own tests.
+
 ## github
 
 | Field | Meaning |
 | --- | --- |
 | `org` | the organization to search. Ignored when `repos` is set |
 | `repos` | specific `owner/name` repositories, which narrows the search and the rate-limit cost |
+| `excludeRepos` | repositories whose hits are discarded. Name the repository under test here: code search has no `selfRoots`, so without it the application's own call sites come back as external evidence |
 | `extraQualifiers` | appended to the `gh search code` command verbatim, for qualifiers such as `--language=php` |
 
 Code search indexes default branches only, and allows roughly ten queries a minute. See the GitHub

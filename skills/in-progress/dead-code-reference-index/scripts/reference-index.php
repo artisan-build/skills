@@ -94,6 +94,10 @@ function usage(): string
                           default: these are the script's false positives, and
                           they are counted either way.
       --max-file-kb=N     skip files bigger than this                (default 512)
+      --max-hits=N        most hits kept per candidate               (default 200)
+                          A very short needle, such as a one-word MCP tool name,
+                          can match thousands of files. The count of what was
+                          dropped is reported either way.
       --no-grep           walk with PHP instead of prefiltering with grep. Slower
                           and used automatically when grep is missing.
       --github-limit=N    most code-search queries this run          (default 30)
@@ -140,6 +144,7 @@ function starterConfig(): string
         "github": {
           "org": "your-org",
           "repos": [],
+          "excludeRepos": ["your-org/the-application-under-test"],
           "extraQualifiers": ""
         },
         "database": {
@@ -161,6 +166,7 @@ $opts = [
     'skip' => [],
     'include-no-context' => false,
     'max-file-kb' => 512,
+    'max-hits' => 200,
     'grep' => true,
     'github-limit' => 30,
     'state' => null,
@@ -190,7 +196,7 @@ foreach (array_slice($argv, 1) as $arg) {
         $opts[$m[1]] = array_values(array_filter(array_map('trim', explode(',', $m[2]))));
         continue;
     }
-    if (preg_match('/^--(max-file-kb|github-limit)=([0-9]+)$/', $arg, $m)) {
+    if (preg_match('/^--(max-file-kb|max-hits|github-limit)=([0-9]+)$/', $arg, $m)) {
         $opts[$m[1]] = (int) $m[2];
         continue;
     }
@@ -402,6 +408,7 @@ final class Needle
         public string $confidence,
         public array $context = [],
         public bool $githubSearchable = false,
+        public bool $wholeName = false,
     ) {}
 }
 
@@ -525,12 +532,12 @@ function functionNeedles(string $name): array
  */
 function routeNeedles(string $name): array
 {
-    $needles = [new Needle($name, 'route-name', C_LINKED, [], true)];
+    $needles = [new Needle($name, 'route-name', C_LINKED, [], true, true)];
 
     $dotted = trim($name, '/');
     if (str_contains($dotted, '.')) {
-        $needles[] = new Needle(str_replace('.', '-', $dotted), 'route-name-kebab', C_INFERRED);
-        $needles[] = new Needle(str_replace('.', '_', $dotted), 'route-name-snake', C_INFERRED);
+        $needles[] = new Needle(str_replace('.', '-', $dotted), 'route-name-kebab', C_INFERRED, [], false, true);
+        $needles[] = new Needle(str_replace('.', '_', $dotted), 'route-name-snake', C_INFERRED, [], false, true);
         $needles[] = new Needle('/' . str_replace('.', '/', $dotted), 'route-uri', C_INFERRED, [], true);
     }
 
@@ -551,7 +558,7 @@ function commandNeedles(string $signature): array
     $name = trim(explode(' ', trim($signature))[0]);
 
     $needles = [
-        new Needle($name, 'command-signature', C_LINKED, [], true),
+        new Needle($name, 'command-signature', C_LINKED, [], true, true),
         new Needle('artisan ' . $name, 'command-invocation', C_LINKED),
         new Needle('artisan("' . $name . '")', 'command-invocation', C_LINKED),
         new Needle("artisan('" . $name . "')", 'command-invocation', C_LINKED),
@@ -567,7 +574,7 @@ function commandNeedles(string $signature): array
 
 function toolNeedles(string $name): array
 {
-    $needles = [new Needle($name, 'tool-name', C_LINKED, [], true)];
+    $needles = [new Needle($name, 'tool-name', C_LINKED, [], true, true)];
 
     if (str_contains($name, '_')) {
         $needles[] = new Needle(str_replace('_', '-', $name), 'tool-name-kebab', C_INFERRED);
@@ -584,7 +591,7 @@ function viewNeedles(string $name): array
     $dotted = str_replace('/', '.', preg_replace('/\.blade\.php$/', '', $name) ?? $name);
 
     return [
-        new Needle($dotted, 'view-name', C_LINKED, [], true),
+        new Needle($dotted, 'view-name', C_LINKED, [], true, true),
         new Needle(str_replace('.', '/', $dotted), 'view-path', C_INFERRED),
     ];
 }
@@ -592,12 +599,30 @@ function viewNeedles(string $name): array
 function genericNeedles(string $symbol): array
 {
     return [
-        new Needle($symbol, 'literal', C_LINKED, [], true),
+        new Needle($symbol, 'literal', C_LINKED, [], true, true),
         new Needle("'" . $symbol . "'", 'literal-string', C_LINKED),
     ];
 }
 
 // ---------------------------------------------------------------- the scanner
+
+/**
+ * A matched line that is safe to put in JSON.
+ *
+ * A repository holds files that are not valid UTF-8: a fixture, a vendored
+ * binary with a text extension, a file saved in a legacy encoding. One such
+ * snippet makes json_encode fail and takes the whole run's output with it, so
+ * bytes that cannot be UTF-8 are replaced here, where exactly one line is lost
+ * instead of the report.
+ */
+function utf8Safe(string $text): string
+{
+    if (preg_match('//u', $text) === 1) {
+        return $text;
+    }
+
+    return (string) preg_replace('/[\x80-\xFF]/', '?', $text);
+}
 
 final class Hit
 {
@@ -610,7 +635,10 @@ final class Hit
         public string $confidence,
         public string $snippet,
         public string $needle,
-    ) {}
+    ) {
+        $this->path = utf8Safe($this->path);
+        $this->snippet = utf8Safe($this->snippet);
+    }
 
     public function toArray(bool $withSnippet): array
     {
@@ -642,6 +670,10 @@ final class Hit
  */
 final class Scanner
 {
+    // Occurrences of one needle kept from one file. A generated file that names a
+    // symbol two hundred times is one piece of evidence, not two hundred.
+    private const HITS_PER_NEEDLE_PER_FILE = 5;
+
     public int $filesWalked = 0;
     public int $filesShortlisted = 0;
     public int $filesRead = 0;
@@ -649,18 +681,38 @@ final class Scanner
     public array $notes = [];
 
     public bool $useGrep;
+    public string $prefilter = 'walker';
 
     public function __construct(private array $opts)
     {
-        $this->useGrep = $opts['grep'] && self::grepAvailable();
+        // Three tools can do the prefilter, and which one is installed changes
+        // the cost of a run by more than an order of magnitude. Over a tree of a
+        // hundred thousand files, ripgrep and ugrep answer in seconds; the BSD
+        // grep that ships with macOS took a minute and a half on the same tree
+        // with the same patterns. Prefer whichever fast one is here, and report
+        // which one ran, so a slow run has a visible reason.
+        if ($opts['grep']) {
+            foreach (['rg', 'ugrep', 'grep'] as $tool) {
+                if (self::onPath($tool)) {
+                    $this->prefilter = $tool;
+                    break;
+                }
+            }
+        }
+
+        $this->useGrep = $this->prefilter !== 'walker';
+
         if ($opts['grep'] && ! $this->useGrep) {
-            $this->notes[] = 'grep is not on PATH; using the slower built-in walker';
+            $this->notes[] = 'no rg, ugrep or grep on PATH; using the built-in walker, which is slower';
+        } elseif ($this->prefilter === 'grep') {
+            $this->notes[] = 'prefiltering with grep. Over a fleet-sized root that is minutes rather '
+                . 'than seconds; installing ripgrep (brew install ripgrep) makes the same run fast';
         }
     }
 
-    private static function grepAvailable(): bool
+    private static function onPath(string $tool): bool
     {
-        exec('command -v grep 2>/dev/null', $out, $code);
+        exec('command -v ' . escapeshellarg($tool) . ' 2>/dev/null', $out, $code);
 
         return $code === 0;
     }
@@ -705,22 +757,15 @@ final class Scanner
         }
         file_put_contents($patternFile, implode("\n", array_keys($texts)) . "\n");
 
-        $cmd = 'grep -rlIF -f ' . escapeshellarg($patternFile);
-        foreach ($exclude as $dir) {
-            $cmd .= ' --exclude-dir=' . escapeshellarg($dir);
-        }
-        foreach ($extensions as $ext) {
-            $cmd .= ' --include=' . escapeshellarg($ext === '' ? '*' : '*.' . $ext);
-        }
-        $cmd .= ' ' . escapeshellarg($root) . ' 2>/dev/null';
+        $cmd = $this->prefilterCommand($patternFile, $root, $extensions, $exclude);
 
         $lines = [];
         exec($cmd, $lines, $code);
         @unlink($patternFile);
 
-        // grep exits 1 when it matched nothing, which is not an error here.
+        // These tools exit 1 when they matched nothing, which is not an error here.
         if ($code > 1) {
-            $this->notes[] = "grep exited {$code} over {$root}; walking instead";
+            $this->notes[] = "{$this->prefilter} exited {$code} over {$root}; walking instead";
 
             return $this->shortlistByWalking($root, $needles, $extensions, $exclude);
         }
@@ -735,6 +780,53 @@ final class Scanner
         $this->filesShortlisted += count($files);
 
         return $files;
+    }
+
+    /**
+     * The prefilter command for whichever tool is installed.
+     *
+     * All three read one literal pattern per line from a file and print the
+     * paths of files containing any of them. Their flags for "do not guess at
+     * encoding", "skip these directories" and "only these extensions" differ.
+     * ripgrep and ugrep also honour ignore files by default, which would hide a
+     * reference in a committed-but-ignored path, so both are told not to.
+     *
+     * @param array<int, string> $extensions
+     * @param array<int, string> $exclude
+     */
+    private function prefilterCommand(string $patternFile, string $root, array $extensions, array $exclude): string
+    {
+        $patterns = escapeshellarg($patternFile);
+        $target = escapeshellarg($root);
+
+        if ($this->prefilter === 'rg') {
+            // ripgrep skips binary files on its own and --no-messages keeps it
+            // from saying so on every one.
+            $cmd = 'rg --files-with-matches --fixed-strings --no-messages --no-ignore --hidden '
+                . '--file=' . $patterns;
+            foreach ($exclude as $dir) {
+                $cmd .= ' --glob=' . escapeshellarg('!' . trim((string) $dir, '/') . '/');
+            }
+            foreach ($extensions as $ext) {
+                $cmd .= ' --glob=' . escapeshellarg($ext === '' ? '*' : '*.' . $ext);
+            }
+
+            return $cmd . ' -- ' . $target . ' 2>/dev/null';
+        }
+
+        // ugrep takes grep's own flags, plus the ignore-file behaviour to turn off.
+        $cmd = $this->prefilter === 'ugrep'
+            ? 'ugrep -rlIF --no-ignore-files --hidden -f ' . $patterns
+            : 'grep -rlIF -f ' . $patterns;
+
+        foreach ($exclude as $dir) {
+            $cmd .= ' --exclude-dir=' . escapeshellarg((string) $dir);
+        }
+        foreach ($extensions as $ext) {
+            $cmd .= ' --include=' . escapeshellarg($ext === '' ? '*' : '*.' . $ext);
+        }
+
+        return $cmd . ' ' . $target . ' 2>/dev/null';
     }
 
     private function shortlistByWalking(string $root, array $needles, array $extensions, array $exclude): array
@@ -786,6 +878,50 @@ final class Scanner
         return $files;
     }
 
+    /**
+     * Whether a match sits on name boundaries rather than inside a longer name.
+     *
+     * The characters a name is built from are letters, digits, and the three
+     * separators a name of this kind uses: a dot, a hyphen and an underscore. A
+     * colon is deliberately NOT one of them, so `inventory:sync` still matches
+     * inside `Schedule::command('inventory:sync')`.
+     */
+    private static function boundedAt(string $contents, int $offset, int $length): bool
+    {
+        $before = $offset > 0 ? $contents[$offset - 1] : '';
+        $afterAt = $offset + $length;
+        $after = $afterAt < strlen($contents) ? $contents[$afterAt] : '';
+
+        return ! self::isNameCharacter($before) && ! self::isNameCharacter($after);
+    }
+
+    private static function isNameCharacter(string $character): bool
+    {
+        return $character !== '' && preg_match('/[A-Za-z0-9._-]/', $character) === 1;
+    }
+
+    /**
+     * The 1-indexed line holding a byte offset, by bisection over the line-start
+     * offsets.
+     *
+     * @param array<int, int> $lineStarts
+     */
+    private static function lineAt(array $lineStarts, int $offset): int
+    {
+        $low = 0;
+        $high = count($lineStarts) - 1;
+        while ($low < $high) {
+            $mid = intdiv($low + $high + 1, 2);
+            if ($lineStarts[$mid] <= $offset) {
+                $low = $mid;
+            } else {
+                $high = $mid - 1;
+            }
+        }
+
+        return $low + 1;
+    }
+
     private function tooBig(string $path): bool
     {
         $size = @filesize($path);
@@ -812,10 +948,19 @@ final class Scanner
         }
         $this->filesRead++;
 
-        $lines = preg_split('/\r\n|\r|\n/', $contents) ?: [];
         $relative = ltrim(substr($path, strlen(rtrim($root, '/'))), '/');
         if ($relative === '') {
             $relative = basename($path);
+        }
+
+        // Byte offset of the start of every line, computed once. Looking a hit's
+        // line number up from its offset by bisection costs nothing; scanning
+        // every line for every needle instead costs a run that takes minutes
+        // when one candidate's name is a common word.
+        $lineStarts = [0];
+        $at = 0;
+        while (($at = strpos($contents, "\n", $at)) !== false) {
+            $lineStarts[] = ++$at;
         }
 
         $satisfied = [];
@@ -855,19 +1000,43 @@ final class Scanner
                 $matchKind = $inContext ? $needle->matchKind : $needle->matchKind . '-no-context';
                 $confidence = $inContext ? $needle->confidence : C_INFERRED;
 
-                foreach ($lines as $i => $line) {
-                    if (! str_contains($line, $needle->text)) {
+                // One hit per LINE, and at most a handful per file. A needle that
+                // appears two hundred times in one generated file says nothing
+                // the first few occurrences did not.
+                $seenLines = [];
+                $offset = 0;
+                while (count($seenLines) < self::HITS_PER_NEEDLE_PER_FILE
+                    && ($offset = strpos($contents, $needle->text, $offset)) !== false) {
+                    $found = $offset;
+                    $offset += strlen($needle->text);
+
+                    // A dotted route name, a command signature and a tool name
+                    // are whole names, and a plain substring search makes one of
+                    // them match inside a longer name. `github.callback` found
+                    // 43 `linked` hits across a fleet, every one of them another
+                    // application's `auth.github.callback`. So these needles
+                    // only count when what sits either side of the match is not
+                    // part of a name.
+                    if ($needle->wholeName && ! self::boundedAt($contents, $found, strlen($needle->text))) {
                         continue;
                     }
 
+                    $line = self::lineAt($lineStarts, $found);
+                    if (isset($seenLines[$line])) {
+                        continue;
+                    }
+                    $seenLines[$line] = true;
+
+                    $start = $lineStarts[$line - 1];
+                    $end = $lineStarts[$line] ?? strlen($contents);
                     $hits[] = new Hit(
                         $source,
                         $root,
                         $relative,
-                        $i + 1,
+                        $line,
                         $matchKind,
                         $confidence,
-                        trim(substr(trim($line), 0, 160)),
+                        trim(substr(trim(substr($contents, $start, $end - $start)), 0, 160)),
                         $needle->text,
                     );
                 }
@@ -930,11 +1099,61 @@ function sourceEnabled(string $name, array $config, array $opts): bool
     return true;
 }
 
+/**
+ * A path that looks like another checkout of the application under test,
+ * somewhere selfRoots did not name. Returns the warning to show, or null.
+ *
+ * A directory merely NAMED after the application is not one: a notes tree has a
+ * folder per project. What makes it a checkout is a manifest sitting in it, so
+ * that is the test, memoised per directory because a shortlist can hold
+ * thousands of paths under the same few roots.
+ */
+function selfLeak(string $path, array $selfRoots): ?string
+{
+    static $checked = [];
+
+    foreach ($selfRoots as $root) {
+        $name = basename($root);
+        if ($name === '') {
+            continue;
+        }
+
+        $at = strpos($path, '/' . $name . '/');
+        if ($at === false) {
+            continue;
+        }
+
+        $candidate = substr($path, 0, $at + strlen($name) + 1);
+        if (! array_key_exists($candidate, $checked)) {
+            $checked[$candidate] = is_file($candidate . '/composer.json')
+                || is_file($candidate . '/artisan')
+                || is_dir($candidate . '/.git')
+                || is_file($candidate . '/.git');
+        }
+
+        if ($checked[$candidate]) {
+            return "'{$candidate}' is another checkout of the application under test, and selfRoots "
+                . 'does not name it. Its hits are the application quoting itself: add it to selfRoots '
+                . 'and run again';
+        }
+    }
+
+    return null;
+}
+
 /** True when this path lives inside the application under test. */
 function isSelf(string $path, array $selfRoots): bool
 {
-    foreach ($selfRoots as $root) {
-        if ($root !== '' && str_starts_with($path, $root . '/')) { return true; }
+    return underAnyPath($path, $selfRoots);
+}
+
+/** @param array<int, string> $prefixes */
+function underAnyPath(string $path, array $prefixes): bool
+{
+    foreach ($prefixes as $prefix) {
+        if ($prefix !== '' && ($path === $prefix || str_starts_with($path, $prefix . '/'))) {
+            return true;
+        }
     }
 
     return false;
@@ -957,6 +1176,11 @@ function runFileSource(
 ): array {
     $roots = array_map('rtrim_slash', (array) ($sourceConfig['roots'] ?? []));
     $exclude = (array) ($sourceConfig['exclude'] ?? DEFAULT_EXCLUDE);
+    // Absolute paths to skip, as opposed to directory names to skip anywhere.
+    // The run's OWN output is the first thing to put here: a report written
+    // under an ops-knowledge root is read on the next run as evidence, and a
+    // candidate then looks alive because the last run said it might be.
+    $excludePaths = array_map('rtrim_slash', (array) ($sourceConfig['excludePaths'] ?? []));
     $extensions = (array) ($sourceConfig['extensions'] ?? (DEFAULT_EXTENSIONS[$name] ?? DEFAULT_EXTENSIONS['repos']));
 
     $union = [];
@@ -979,6 +1203,23 @@ function runFileSource(
                 // report an application as evidence of its own liveness.
                 if (isSelf($file, $selfRoots) && $name !== 'deploy' && $name !== 'contracts') {
                     continue;
+                }
+
+                if (underAnyPath($file, $excludePaths)) {
+                    continue;
+                }
+
+                // A checkout of the application under test that selfRoots did
+                // not name reads as external evidence about itself, and the hits
+                // look perfect: its own route names, its own class names, its
+                // own tests. A live run found 21 `linked` hits for one route in
+                // a worktree under a hidden `.worktrees` directory. So any path
+                // holding a directory named like a selfRoot is flagged.
+                if (! isSelf($file, $selfRoots)) {
+                    $leak = selfLeak($file, $selfRoots);
+                    if ($leak !== null) {
+                        $scanner->notes[$leak] = $leak;
+                    }
                 }
 
                 foreach ($scanner->examine($name, $root, $file, $needlesByCandidate) as $index => $found) {
@@ -1030,6 +1271,7 @@ final class GitHubSearch
     public int $queriesMade = 0;
     public int $queriesSkipped = 0;
     public int $pending = 0;
+    public int $selfHitsDropped = 0;
     /** @var array<int, string> */
     public array $notes = [];
     private array $state = ['version' => SCHEMA_VERSION, 'queries' => []];
@@ -1075,6 +1317,19 @@ final class GitHubSearch
         $repos = array_values(array_filter((array) ($this->sourceConfig['repos'] ?? [])));
         $extra = trim((string) ($this->sourceConfig['extraQualifiers'] ?? ''));
 
+        // The organization holds the repository under test, and code search has
+        // no equivalent of selfRoots: without this, the application's own
+        // repository is returned as external evidence about itself, and the
+        // hits look flawless because they are its own call sites.
+        $excluded = [];
+        foreach ((array) ($this->sourceConfig['excludeRepos'] ?? []) as $repo) {
+            $excluded[strtolower(trim((string) $repo))] = true;
+        }
+        if ($excluded === []) {
+            $this->notes[] = 'the github source names no excludeRepos, so the repository under test is '
+                . 'searched alongside the others and will return its own call sites';
+        }
+
         if ($org === '' && $repos === []) {
             $this->notes[] = 'the github source names neither an org nor repos, so it did not run';
 
@@ -1102,9 +1357,16 @@ final class GitHubSearch
                 }
 
                 foreach ($cached['results'] ?? [] as $result) {
+                    $repository = (string) ($result['repository'] ?? $org);
+                    $bare = strtolower((string) (strrchr($repository, '/') ?: $repository));
+                    if (isset($excluded[strtolower($repository)]) || isset($excluded[ltrim($bare, '/')])) {
+                        $this->selfHitsDropped++;
+                        continue;
+                    }
+
                     $hits[$index][] = new Hit(
                         'github',
-                        (string) ($result['repository'] ?? $org),
+                        $repository,
                         (string) ($result['path'] ?? ''),
                         0,
                         $needle->matchKind,
@@ -1159,7 +1421,7 @@ final class GitHubSearch
                     $snippet = '';
                     foreach ((array) ($item['textMatches'] ?? []) as $match) {
                         if (is_array($match) && isset($match['fragment'])) {
-                            $snippet = trim(substr((string) $match['fragment'], 0, 160));
+                            $snippet = utf8Safe(trim(substr((string) $match['fragment'], 0, 160)));
                             break;
                         }
                     }
@@ -1191,8 +1453,18 @@ final class GitHubSearch
     {
         if ($this->opts['state'] === null) { return; }
 
-        $json = json_encode($this->state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
-        if ($json === false) { return; }
+        $json = json_encode(
+            $this->state,
+            JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE,
+        );
+        if ($json === false) {
+            // Silence here used to cost a whole run's resumability: the file was
+            // simply never written and nothing said so.
+            $this->notes[] = 'could not encode the state file (' . json_last_error_msg()
+                . '); this run is not resumable';
+
+            return;
+        }
 
         if (@file_put_contents($this->opts['state'], $json . "\n") === false) {
             $this->notes[] = 'could not write the state file; this run is not resumable';
@@ -1522,7 +1794,9 @@ function renderReport(array $result, array $opts): string
     }
     $budget = $result['budget'];
     $out[] = 'files read    ' . $budget['filesRead'] . ' of ' . $budget['filesShortlisted'] . ' shortlisted'
-        . ($budget['usedGrep'] ? ' (grep prefilter)' : ' (' . $budget['filesWalked'] . ' walked)');
+        . ($budget['usedGrep']
+            ? ' (' . $budget['prefilter'] . ' prefilter)'
+            : ' (' . $budget['filesWalked'] . ' walked)');
     if (($budget['githubQueries'] ?? 0) > 0 || ($budget['githubPending'] ?? 0) > 0) {
         $out[] = 'github        ' . $budget['githubQueries'] . ' queries, '
             . $budget['githubCached'] . ' from state, ' . $budget['githubPending'] . ' still pending';
@@ -1549,7 +1823,10 @@ function renderReport(array $result, array $opts): string
             }
             $out[] = $line;
             $out[] = '      ' . $counts['linked'] . ' linked, ' . $counts['inferred'] . ' inferred, '
-                . $counts['noContextSuppressed'] . ' suppressed for want of context';
+                . $counts['noContextSuppressed'] . ' suppressed for want of context'
+                . ($counts['droppedOverMaxHits'] > 0
+                    ? ', ' . $counts['droppedOverMaxHits'] . ' not shown (over --max-hits)'
+                    : '');
 
             $shown = 0;
             foreach ($candidate['hits'] as $hit) {
@@ -1635,13 +1912,27 @@ foreach ($candidates['rows'] as $index => $candidate) {
     $needlesByCandidate[$index] = needlesFor($candidate);
 }
 
+// A needle of a few characters with no context requirement cannot be fenced,
+// which makes it both the slowest thing this script can search for and the
+// least conclusive. Say so before the run rather than after it.
+$shortNeedleNotes = [];
+foreach ($needlesByCandidate as $index => $needles) {
+    foreach ($needles as $needle) {
+        if ($needle->context === [] && strlen($needle->text) < 8 && ! str_contains($needle->text, ':')) {
+            $shortNeedleNotes["'{$needle->text}' is only " . strlen($needle->text)
+                . ' characters and cannot be fenced by context: expect false positives, a large hit'
+                . ' count and a slow run for ' . $candidates['rows'][$index]['symbol']] = true;
+        }
+    }
+}
+
 $scanner = new Scanner($opts);
 $hitsByCandidate = [];
 $suppressedByCandidate = [];
 $notes = [];
 $sourcesRun = [];
 $sourcesSkipped = [];
-$githubStats = ['queries' => 0, 'cached' => 0, 'pending' => 0];
+$githubStats = ['queries' => 0, 'cached' => 0, 'pending' => 0, 'selfHitsDropped' => 0];
 $database = ['sql' => [], 'sqlScript' => '', 'ran' => false, 'distinctValues' => []];
 
 foreach (SOURCE_KINDS as $name) {
@@ -1667,6 +1958,7 @@ foreach (SOURCE_KINDS as $name) {
             'queries' => $search->queriesMade,
             'cached' => $search->queriesSkipped,
             'pending' => $search->pending,
+            'selfHitsDropped' => $search->selfHitsDropped,
         ];
         $notes = array_merge($notes, $search->notes);
         $sourcesRun[] = $name;
@@ -1700,7 +1992,7 @@ foreach (SOURCE_KINDS as $name) {
     $sourcesRun[] = $name;
 }
 
-$notes = array_merge($notes, $scanner->notes);
+$notes = array_merge($notes, array_values($scanner->notes), array_keys($shortNeedleNotes));
 
 $rendered = [];
 foreach ($candidates['rows'] as $index => $candidate) {
@@ -1715,6 +2007,15 @@ foreach ($candidates['rows'] as $index => $candidate) {
     $inferred = 0;
     foreach ($hits as $hit) {
         $hit->confidence === C_LINKED ? $linked++ : $inferred++;
+    }
+
+    // Truncate AFTER counting, so the counts stay honest and the report says
+    // how many hits it is not showing. Linked hits sort first, so what survives
+    // is the evidence worth reading.
+    $dropped = 0;
+    if (count($hits) > $opts['max-hits']) {
+        $dropped = count($hits) - $opts['max-hits'];
+        $hits = array_slice($hits, 0, $opts['max-hits']);
     }
 
     $rendered[] = [
@@ -1732,6 +2033,7 @@ foreach ($candidates['rows'] as $index => $candidate) {
             'linked' => $linked,
             'inferred' => $inferred,
             'noContextSuppressed' => $suppressedByCandidate[$index] ?? 0,
+            'droppedOverMaxHits' => $dropped,
         ],
         'needles' => array_map(
             static fn (Needle $n) => ['text' => $n->text, 'matchKind' => $n->matchKind, 'confidence' => $n->confidence],
@@ -1759,9 +2061,11 @@ $result = [
         'filesShortlisted' => $scanner->filesShortlisted,
         'filesRead' => $scanner->filesRead,
         'usedGrep' => $scanner->useGrep,
+        'prefilter' => $scanner->prefilter,
         'githubQueries' => $githubStats['queries'],
         'githubCached' => $githubStats['cached'],
         'githubPending' => $githubStats['pending'],
+        'githubSelfHitsDropped' => $githubStats['selfHitsDropped'],
     ],
     'candidates' => $rendered,
     'database' => $database,
@@ -1769,9 +2073,12 @@ $result = [
 ];
 
 if ($opts['json']) {
-    $json = json_encode($result, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $json = json_encode(
+        $result,
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE,
+    );
     if ($json === false) {
-        fwrite(STDERR, "could not encode the result as JSON\n");
+        fwrite(STDERR, 'could not encode the result as JSON: ' . json_last_error_msg() . "\n");
         exit(1);
     }
     fwrite(STDOUT, $json . "\n");

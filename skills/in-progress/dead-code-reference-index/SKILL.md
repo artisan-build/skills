@@ -72,9 +72,16 @@ docs directories, and a hit there means something different from the others: the
 so removing it breaks somebody you cannot enumerate. `github` runs organization-wide code search
 through `gh`. `database` looks for class names stored as strings.
 
-`selfRoots` names the application under test. References inside it are excluded from `repos` and
-`ops`, because counting an application as evidence of its own liveness is the mistake this skill
-exists to avoid. The `deploy` and `contracts` sources are deliberately exempt: an application's own
+`selfRoots` names the application under test, and it has to name **every** checkout of it: worktrees,
+hidden ones, a second clone somebody made last March. References inside those are excluded from
+`repos` and `ops`, because counting an application as evidence of its own liveness is the mistake
+this skill exists to avoid. The run warns in `notes` when a hit comes from a directory that looks
+like another checkout, which is how you find the ones you forgot.
+
+Two other ways the same mistake gets in. The `github` source needs `excludeRepos` naming the
+repository under test, because code search has no `selfRoots` and the organization holds that
+repository. And any search root holding this skill's own earlier output needs that output directory
+in `excludePaths`, or the next run reads the last run's report as evidence. The `deploy` and `contracts` sources are deliberately exempt: an application's own
 CI workflow and its own published OpenAPI document are both external evidence about its code.
 
 ## 3. Run it
@@ -82,6 +89,10 @@ CI workflow and its own published OpenAPI document are both external evidence ab
 ```bash
 php scripts/reference-index.php --candidates=candidates.tsv --config=sources.json
 ```
+
+The report names which prefilter ran. ripgrep and ugrep answer in seconds over a fleet-sized tree;
+the BSD grep that ships with macOS took a minute and a half over the same tree with the same
+patterns, so `brew install ripgrep` is the difference between a run you wait for and one you do not.
 
 Add `--json` to compute over the result, or `--tsv` for the hit table alone. Both are documented in
 [OUTPUT.md](OUTPUT.md). Useful flags:
@@ -91,10 +102,15 @@ Add `--json` to compute over the result, or `--tsv` for the hit table alone. Bot
 | `--only=repos,ops` | one or two sources while you are still shaping the config |
 | `--include-no-context` | the suppressed matches, which is where the false positives are |
 | `--github-limit=N` `--state=FILE` | a bounded, resumable GitHub search |
+| `--max-hits=N` | caps hits kept per candidate (200 by default) |
 | `--no-snippet` | drops the matched line, for output you are passing on |
 
-A run over a hundred thousand files takes seconds with the grep prefilter in place. The GitHub source
-is the slow one, because code search allows roughly ten queries a minute.
+A run over a hundred thousand files takes seconds with the grep prefilter in place, unless a
+candidate's name is a short common word. A one-word MCP tool name such as `catalog` matches most of
+a fleet, which is slow and tells you nothing; the script warns about any unfenceable needle under
+eight characters in `notes`, and `--max-hits` bounds what it keeps per candidate while still counting
+what it dropped. The GitHub source is the other slow one, because code search allows roughly ten
+queries a minute.
 
 ## 4. Read the verdicts
 
