@@ -67,6 +67,10 @@ introduced it. The age the rule uses comes from the second when it exists.
 Answers: `planned-keep`, `abandoned`, `unknown`. Code not used yet looks exactly like code not
 used any more, and a static analyser has no way to tell the future from the past.
 
+Set `--recent-days` against the repository's own age. On a young repository the default of 90 days
+catches everything: a live run over an application whose history starts 62 days ago put all fifteen
+candidates in this category, and none of them was really new.
+
 ## manual-operation
 
 Asked when the candidate's kind is `command` or `job`, or when the index found a hit in the `ops` or

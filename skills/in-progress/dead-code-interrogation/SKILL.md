@@ -62,7 +62,9 @@ manifest as a package.
 `--app-root` is where relative candidate locations resolve from, and where feature-flag patterns are
 read. It defaults to `--repo`, then to the working directory.
 
-`--recent-days` sets how new counts as new, and defaults to 90.
+`--recent-days` sets how new counts as new, and defaults to 90. Set it against the repository's own
+age: on an application whose history starts 62 days ago, the default put all fifteen candidates of a
+live run in the not-yet-used category and none of them was really new.
 
 ## 2. Read the categories
 
