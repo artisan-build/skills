@@ -1,0 +1,3 @@
+interface:
+  display_name: "Dead Code Interrogation"
+  short_description: "Turn undecidable dead-code evidence into grouped questions, and keep the answers"
