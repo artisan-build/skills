@@ -1,6 +1,6 @@
 {
   "name": "artisan-build-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Artisan Build's agent skills for shipping and operating Laravel applications",
   "repository": {
